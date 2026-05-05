@@ -1842,6 +1842,12 @@ class AIAgent:
         compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
         compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
         compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
+        try:
+            active_transcript_byte_cap = int(_compression_cfg.get("active_transcript_byte_cap", 512 * 1024))
+        except (TypeError, ValueError):
+            active_transcript_byte_cap = 512 * 1024
+        if active_transcript_byte_cap < 0:
+            active_transcript_byte_cap = 0
 
         # Read optional explicit context_length override for the auxiliary
         # compression model. Custom endpoints often cannot report this via
@@ -2027,6 +2033,7 @@ class AIAgent:
                 api_mode=self.api_mode,
             )
         self.compression_enabled = compression_enabled
+        self.active_transcript_byte_cap = active_transcript_byte_cap
 
         # Reject models whose context window is below the minimum required
         # for reliable tool-calling workflows (64K tokens).
@@ -10673,20 +10680,44 @@ class AIAgent:
                 system_prompt=active_system_prompt or "",
                 tools=self.tools or None,
             )
+            _active_transcript_bytes = 0
+            _byte_cap = int(getattr(self, "active_transcript_byte_cap", 0) or 0)
+            if _byte_cap > 0:
+                try:
+                    _active_transcript_bytes = len(json.dumps(messages, ensure_ascii=False, default=str).encode("utf-8"))
+                except Exception:
+                    _active_transcript_bytes = 0
 
-            if _preflight_tokens >= self.context_compressor.threshold_tokens:
-                logger.info(
-                    "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
-                    f"{_preflight_tokens:,}",
-                    f"{self.context_compressor.threshold_tokens:,}",
-                    self.model,
-                    f"{self.context_compressor.context_length:,}",
-                )
-                self._emit_status(
-                    f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
-                    f">= {self.context_compressor.threshold_tokens:,} threshold. "
-                    "This may take a moment."
-                )
+            _needs_token_compression = _preflight_tokens >= self.context_compressor.threshold_tokens
+            _needs_byte_cap_compression = bool(_byte_cap > 0 and _active_transcript_bytes >= _byte_cap)
+
+            if _needs_token_compression or _needs_byte_cap_compression:
+                if _needs_byte_cap_compression and not _needs_token_compression:
+                    logger.info(
+                        "Preflight compression: active transcript %s bytes >= %s byte cap (model %s)",
+                        f"{_active_transcript_bytes:,}",
+                        f"{_byte_cap:,}",
+                        self.model,
+                    )
+                    if not self.quiet_mode:
+                        self._emit_status(
+                            f"📦 Preflight compression: active transcript {_active_transcript_bytes:,} bytes "
+                            f">= {_byte_cap:,} byte cap. This may take a moment."
+                        )
+                else:
+                    logger.info(
+                        "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
+                        f"{_preflight_tokens:,}",
+                        f"{self.context_compressor.threshold_tokens:,}",
+                        self.model,
+                        f"{self.context_compressor.context_length:,}",
+                    )
+                    if not self.quiet_mode:
+                        self._emit_status(
+                            f"📦 Preflight compression: ~{_preflight_tokens:,} tokens "
+                            f">= {self.context_compressor.threshold_tokens:,} threshold. "
+                            "This may take a moment."
+                        )
                 # May need multiple passes for very large sessions with small
                 # context windows (each pass summarises the middle N turns).
                 for _pass in range(3):
@@ -10719,8 +10750,17 @@ class AIAgent:
                         system_prompt=active_system_prompt or "",
                         tools=self.tools or None,
                     )
-                    if _preflight_tokens < self.context_compressor.threshold_tokens:
-                        break  # Under threshold
+                    _active_transcript_bytes = 0
+                    if _byte_cap > 0:
+                        try:
+                            _active_transcript_bytes = len(json.dumps(messages, ensure_ascii=False, default=str).encode("utf-8"))
+                        except Exception:
+                            _active_transcript_bytes = 0
+                    if (
+                        _preflight_tokens < self.context_compressor.threshold_tokens
+                        and not (_byte_cap > 0 and _active_transcript_bytes >= _byte_cap)
+                    ):
+                        break  # Under threshold and under byte cap
 
         # Plugin hook: pre_llm_call
         # Fired once per turn before the tool-calling loop.  Plugins can

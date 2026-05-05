@@ -53,6 +53,57 @@ SCOPES = [
     "https://www.googleapis.com/auth/documents.readonly",
 ]
 
+SERVICE_SCOPES = {
+    "email": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.modify",
+    ],
+    "gmail": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.modify",
+    ],
+    "calendar": ["https://www.googleapis.com/auth/calendar"],
+    "drive": ["https://www.googleapis.com/auth/drive.readonly"],
+    "contacts": ["https://www.googleapis.com/auth/contacts.readonly"],
+    "people": ["https://www.googleapis.com/auth/contacts.readonly"],
+    "sheets": ["https://www.googleapis.com/auth/spreadsheets"],
+    "docs": ["https://www.googleapis.com/auth/documents.readonly"],
+    "documents": ["https://www.googleapis.com/auth/documents.readonly"],
+    "all": SCOPES,
+}
+
+
+def scopes_for_services(services: str | None) -> list[str]:
+    """Resolve a comma-separated service list into OAuth scopes."""
+    if not services:
+        return list(SCOPES)
+
+    resolved: list[str] = []
+    unknown: list[str] = []
+    for raw_name in services.split(","):
+        name = raw_name.strip().lower()
+        if not name:
+            continue
+        service_scopes = SERVICE_SCOPES.get(name)
+        if not service_scopes:
+            unknown.append(name)
+            continue
+        for scope in service_scopes:
+            if scope not in resolved:
+                resolved.append(scope)
+
+    if unknown:
+        allowed = ", ".join(sorted(SERVICE_SCOPES))
+        print(f"ERROR: Unknown service(s): {', '.join(unknown)}")
+        print(f"Allowed services: {allowed}")
+        sys.exit(1)
+    if not resolved:
+        print("ERROR: No services selected.")
+        sys.exit(1)
+    return resolved
+
 REQUIRED_PACKAGES = ["google-api-python-client", "google-auth-oauthlib", "google-auth-httplib2"]
 
 # OAuth redirect for "out of band" manual code copy flow.
@@ -206,7 +257,7 @@ def store_client_secret(path: str):
     print(f"OK: Client secret saved to {CLIENT_SECRET_PATH}")
 
 
-def _save_pending_auth(*, state: str, code_verifier: str):
+def _save_pending_auth(*, state: str, code_verifier: str, scopes: list[str]):
     """Persist the OAuth session bits needed for a later token exchange."""
     PENDING_AUTH_PATH.write_text(
         json.dumps(
@@ -214,6 +265,7 @@ def _save_pending_auth(*, state: str, code_verifier: str):
                 "state": state,
                 "code_verifier": code_verifier,
                 "redirect_uri": REDIRECT_URI,
+                "scopes": scopes,
             },
             indent=2,
         )
@@ -258,7 +310,7 @@ def _extract_code_and_state(code_or_url: str) -> tuple[str, str | None]:
     return params["code"][0], state
 
 
-def get_auth_url():
+def get_auth_url(services: str | None = None):
     """Print the OAuth authorization URL. User visits this in a browser."""
     if not CLIENT_SECRET_PATH.exists():
         print("ERROR: No client secret stored. Run --client-secret first.")
@@ -267,9 +319,11 @@ def get_auth_url():
     _ensure_deps()
     from google_auth_oauthlib.flow import Flow
 
+    scopes = scopes_for_services(services)
+
     flow = Flow.from_client_secrets_file(
         str(CLIENT_SECRET_PATH),
-        scopes=SCOPES,
+        scopes=scopes,
         redirect_uri=REDIRECT_URI,
         autogenerate_code_verifier=True,
     )
@@ -277,7 +331,7 @@ def get_auth_url():
         access_type="offline",
         prompt="consent",
     )
-    _save_pending_auth(state=state, code_verifier=flow.code_verifier)
+    _save_pending_auth(state=state, code_verifier=flow.code_verifier, scopes=scopes)
     # Print just the URL so the agent can extract it cleanly
     print(auth_url)
 
@@ -300,7 +354,7 @@ def exchange_auth_code(code: str):
     from urllib.parse import parse_qs, urlparse
 
     # Extract granted scopes from the callback URL if the user pasted the full redirect URL.
-    granted_scopes = list(SCOPES)
+    granted_scopes = list(pending_auth.get("scopes") or SCOPES)
     if isinstance(raw_callback, str) and raw_callback.startswith("http"):
         params = parse_qs(urlparse(raw_callback).query)
         scope_val = (params.get("scope") or [""])[0].strip()
@@ -389,6 +443,11 @@ def main():
     group.add_argument("--auth-code", metavar="CODE", help="Exchange auth code for token")
     group.add_argument("--revoke", action="store_true", help="Revoke and delete stored token")
     group.add_argument("--install-deps", action="store_true", help="Install Python dependencies")
+    parser.add_argument(
+        "--services",
+        default=None,
+        help="Comma-separated services for --auth-url: email/gmail,calendar,drive,contacts,sheets,docs,all (default: all)",
+    )
     args = parser.parse_args()
 
     if args.check:
@@ -396,7 +455,7 @@ def main():
     elif args.client_secret:
         store_client_secret(args.client_secret)
     elif args.auth_url:
-        get_auth_url()
+        get_auth_url(args.services)
     elif args.auth_code:
         exchange_auth_code(args.auth_code)
     elif args.revoke:

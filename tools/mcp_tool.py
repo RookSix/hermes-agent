@@ -1309,8 +1309,12 @@ class MCPServerTask:
                     "manual refresh)",
                     self.name,
                 )
-                # Reset the session reference; _run_http/_run_stdio will
-                # repopulate it on successful re-entry.
+                # Reset the session reference only between reconnect cycles.
+                # Do this here instead of in finally: _run_http/_run_stdio keep
+                # a live ClientSession open until shutdown/reconnect. Clearing
+                # self.session in finally after a successful connection leaves
+                # the transport alive but makes every registered tool report
+                # "not connected" (or race against a closed resource).
                 self.session = None
                 # Keep _ready set across reconnects so tool handlers can
                 # still detect a transient in-flight state — it'll be
@@ -1381,7 +1385,11 @@ class MCPServerTask:
                 if self._shutdown_event.is_set():
                     return
             finally:
-                self.session = None
+                # Do not clear self.session here. On a successful connection,
+                # _run_http/_run_stdio intentionally remain suspended inside
+                # their transport context until shutdown/reconnect, and the
+                # live ClientSession is what registered tool handlers use.
+                pass
 
     async def start(self, config: dict):
         """Create the background Task and wait until ready (or failed)."""

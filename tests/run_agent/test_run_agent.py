@@ -2843,6 +2843,37 @@ class TestRunConversation:
         assert result["final_response"] == "All done"
         assert result["completed"] is True
 
+    def test_active_transcript_byte_cap_triggers_preflight_compression(self, agent):
+        """Oversized active transcripts compact before API calls even below token threshold."""
+        self._setup_agent(agent)
+        agent.compression_enabled = True
+        agent.active_transcript_byte_cap = 200
+        agent.context_compressor.protect_first_n = 1
+        agent.context_compressor.protect_last_n = 0
+        agent.context_compressor.threshold_tokens = 10_000_000
+        resp = _mock_response(content="After byte-cap compression", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+        history = [
+            {"role": "user", "content": "old question " + ("x" * 300)},
+            {"role": "assistant", "content": "old answer " + ("y" * 300)},
+        ]
+
+        with (
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            mock_compress.return_value = (
+                [{"role": "user", "content": "compressed summary"}],
+                "compressed system prompt",
+            )
+            result = agent.run_conversation("new question", conversation_history=history)
+
+        mock_compress.assert_called_once()
+        assert result["final_response"] == "After byte-cap compression"
+        assert result["completed"] is True
+
     def test_glm_prompt_exceeds_max_length_triggers_compression(self, agent):
         """GLM/Z.AI uses 'Prompt exceeds max length' for context overflow."""
         self._setup_agent(agent)

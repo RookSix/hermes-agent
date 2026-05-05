@@ -530,7 +530,7 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     return None
 
 
-_DEFAULT_SCRIPT_TIMEOUT = 120  # seconds
+_DEFAULT_SCRIPT_TIMEOUT = 600  # seconds (increased for Qwen batch completions)
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _SCRIPT_TIMEOUT = _DEFAULT_SCRIPT_TIMEOUT
 
