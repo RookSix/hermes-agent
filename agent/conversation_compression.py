@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 from agent.model_metadata import estimate_request_tokens_rough
+from agent.context_compressor import LEGACY_SUMMARY_PREFIX, SUMMARY_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -305,25 +306,49 @@ def compress_context(
         "🗜️ Compacting context — summarizing earlier conversation so I can continue..."
     )
 
-    # Notify external memory provider before compression discards context
+    # Notify external memory provider before compression discards context.
+    # The hook may also return compact extracted state / offload pointers;
+    # preserve that in the compression checkpoint so provider work is not
+    # discarded before the summarizer sees it.
+    provider_context = ""
     if agent._memory_manager:
         try:
-            agent._memory_manager.on_pre_compress(messages)
+            provider_context = agent._memory_manager.on_pre_compress(messages) or ""
         except Exception:
-            pass
+            provider_context = ""
 
     try:
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens, focus_topic=focus_topic, force=force)
+        compressed = agent.context_compressor.compress(
+            messages,
+            current_tokens=approx_tokens,
+            focus_topic=focus_topic,
+            force=force,
+            provider_context=provider_context,
+        )
     except TypeError:
         # Plugin context engine with strict signature that doesn't accept
-        # focus_topic / force — fall back to calling without them.
-        compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
+        # force/provider_context/focus_topic — fall back to older call shapes.
+        try:
+            compressed = agent.context_compressor.compress(
+                messages,
+                current_tokens=approx_tokens,
+                focus_topic=focus_topic,
+                provider_context=provider_context,
+            )
+        except TypeError:
+            try:
+                compressed = agent.context_compressor.compress(
+                    messages,
+                    current_tokens=approx_tokens,
+                    focus_topic=focus_topic,
+                )
+            except TypeError:
+                compressed = agent.context_compressor.compress(messages, current_tokens=approx_tokens)
 
     # If compression aborted (aux LLM failed to produce a usable summary)
-    # the compressor returns the input messages unchanged.  Surface the
-    # error to the user, skip the session-rotation work entirely (no
-    # session has logically ended), and let auto-compress callers detect
-    # the no-op via len(returned) == len(input).
+    # the compressor returns the input messages unchanged. Surface the
+    # error to the user, skip session rotation entirely, and let
+    # auto-compress callers detect the no-op via len(returned) == len(input).
     if getattr(agent.context_compressor, "_last_compress_aborted", False):
         _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
         if getattr(agent, "_last_compression_summary_warning", None) != _err:
@@ -338,9 +363,18 @@ def compress_context(
             _existing_sp = agent._build_system_prompt(system_message)
         return messages, _existing_sp
 
-    summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
-    if summary_error:
-        if getattr(agent, "_last_compression_summary_warning", None) != summary_error:
+    _has_summary_marker = any(
+        isinstance(m, dict)
+        and isinstance(m.get("content"), str)
+        and (
+            m["content"].startswith(SUMMARY_PREFIX)
+            or m["content"].startswith(LEGACY_SUMMARY_PREFIX)
+        )
+        for m in (compressed or [])
+    )
+    if compressed is messages or (len(compressed) >= _pre_msg_count and not _has_summary_marker):
+        summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
+        if summary_error and getattr(agent, "_last_compression_summary_warning", None) != summary_error:
             agent._last_compression_summary_warning = summary_error
             agent._emit_warning(
                 f"⚠ Compression summary failed: {summary_error}. "
