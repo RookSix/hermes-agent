@@ -693,6 +693,30 @@ class SessionDB:
     ) -> None:
         """Shared INSERT OR IGNORE for session rows."""
         def _do(conn):
+            started_at = time.time()
+            if parent_session_id and parent_session_id != session_id:
+                # Gateway/process restarts can leave a valid session_id in the
+                # gateway session store even when the corresponding SQLite
+                # parent row was never created (for example, a double-start race
+                # during gateway boot).  Compression then tries to create a
+                # child row with parent_session_id and SQLite correctly rejects
+                # it.  Preserve the lineage by creating a minimal parent stub
+                # before inserting the child instead of dropping the new
+                # compression session on the floor.
+                conn.execute(
+                    """INSERT OR IGNORE INTO sessions (id, source, user_id, model,
+                       model_config, system_prompt, parent_session_id, started_at)
+                       VALUES (?, ?, ?, ?, ?, ?, NULL, ?)""",
+                    (
+                        parent_session_id,
+                        source or "unknown",
+                        user_id,
+                        model,
+                        json.dumps(model_config) if model_config else None,
+                        None,
+                        started_at,
+                    ),
+                )
             conn.execute(
                 """INSERT OR IGNORE INTO sessions (id, source, user_id, model, model_config,
                    system_prompt, parent_session_id, started_at)
@@ -705,7 +729,7 @@ class SessionDB:
                     json.dumps(model_config) if model_config else None,
                     system_prompt,
                     parent_session_id,
-                    time.time(),
+                    started_at,
                 ),
             )
         self._execute_write(_do)
