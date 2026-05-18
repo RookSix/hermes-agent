@@ -769,6 +769,12 @@ class _CodexCompletionsAdapter:
                 logger.debug("Codex auxiliary: cache eviction on timeout failed", exc_info=True)
 
         def _check_cancelled() -> None:
+            # The timer thread can fire while the Responses stream iterator is
+            # blocked waiting for the next event.  Check that explicit signal
+            # first so a still-yielding stream cannot run until exhaustion just
+            # because the next monotonic deadline check arrives late under load.
+            if timed_out.is_set():
+                raise TimeoutError(_timeout_message())
             if deadline is not None and time.monotonic() >= deadline:
                 if not timed_out.is_set():
                     _close_client_on_timeout()

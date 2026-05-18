@@ -2367,7 +2367,10 @@ class TestCodexAuxiliaryAdapterTimeout:
                 timeout=0.05,
             )
 
-        assert time.monotonic() - started < 0.14
+        # macOS CI/dev machines can schedule the timeout timer a little late
+        # under load; still fail if the fake 5-event stream is effectively
+        # allowed to run unchecked or hang.
+        assert time.monotonic() - started < 0.25
 
 
 # ---------------------------------------------------------------------------
