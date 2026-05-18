@@ -36,6 +36,29 @@ class TestSessionLifecycle:
         assert session["ended_at"] is None
 
 
+    def test_create_child_session_backfills_missing_parent_stub(self, db):
+        """Compression split should not die if gateway has a session id whose
+        SQLite parent row was lost during a startup race.
+        """
+        db.create_session(
+            session_id="child-session",
+            source="telegram",
+            user_id="adam",
+            model="gpt-5.5",
+            parent_session_id="missing-parent-session",
+        )
+
+        parent = db.get_session("missing-parent-session")
+        child = db.get_session("child-session")
+
+        assert parent is not None
+        assert parent["source"] == "telegram"
+        assert parent["user_id"] == "adam"
+        assert parent["model"] == "gpt-5.5"
+        assert parent["parent_session_id"] is None
+        assert child is not None
+        assert child["parent_session_id"] == "missing-parent-session"
+
     def test_get_nonexistent_session(self, db):
         assert db.get_session("nonexistent") is None
 
