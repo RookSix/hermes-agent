@@ -927,6 +927,11 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         logger.warning("mark_job_run: job_id %s not found, skipping save", job_id)
 
 
+def _job_is_paused(job: Dict[str, Any]) -> bool:
+    """Return True when a job is explicitly paused, even if legacy data still has enabled=true."""
+    return job.get("state") == "paused" or not job.get("enabled", True)
+
+
 def advance_next_run(job_id: str) -> bool:
     """Preemptively advance next_run_at for a recurring job before execution.
 
@@ -943,6 +948,8 @@ def advance_next_run(job_id: str) -> bool:
         jobs = load_jobs()
         for job in jobs:
             if job["id"] == job_id:
+                if _job_is_paused(job):
+                    return False
                 kind = job.get("schedule", {}).get("kind")
                 if kind not in {"cron", "interval"}:
                     return False
@@ -977,7 +984,7 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
     needs_save = False
 
     for job in jobs:
-        if not job.get("enabled", True):
+        if _job_is_paused(job):
             continue
 
         next_run = job.get("next_run_at")
