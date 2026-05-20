@@ -613,6 +613,21 @@ class TestAdvanceNextRun:
         result = advance_next_run("nonexistent-id")
         assert result is False
 
+    def test_paused_state_job_not_advanced_even_if_enabled_true(self, tmp_cron_dir):
+        """Legacy paused jobs with enabled=true must not have next_run_at advanced/run."""
+        job = create_job(prompt="Legacy paused", schedule="every 1h")
+        jobs = load_jobs()
+        original_next = (datetime.now() - timedelta(minutes=5)).isoformat()
+        jobs[0]["enabled"] = True
+        jobs[0]["state"] = "paused"
+        jobs[0]["next_run_at"] = original_next
+        save_jobs(jobs)
+
+        assert advance_next_run(job["id"]) is False
+        updated = get_job(job["id"])
+        assert updated is not None
+        assert updated["next_run_at"] == original_next
+
     def test_already_future_stays_future(self, tmp_cron_dir):
         """If next_run_at is already in the future, advance keeps it in the future (no harm)."""
         job = create_job(prompt="Future job", schedule="every 1h")
@@ -693,6 +708,20 @@ class TestGetDueJobs:
 
         due = get_due_jobs()
         assert len(due) == 0
+
+    def test_paused_state_not_returned_even_if_enabled_true(self, tmp_cron_dir):
+        job = create_job(prompt="Legacy paused", schedule="every 1h")
+        jobs = load_jobs()
+        jobs[0]["enabled"] = True
+        jobs[0]["state"] = "paused"
+        jobs[0]["next_run_at"] = (datetime.now() - timedelta(minutes=5)).isoformat()
+        save_jobs(jobs)
+
+        due = get_due_jobs()
+        assert due == []
+        updated = get_job(job["id"])
+        assert updated is not None
+        assert updated["state"] == "paused"
 
     def test_broken_recent_one_shot_without_next_run_is_recovered(self, tmp_cron_dir, monkeypatch):
         now = datetime(2026, 3, 18, 4, 22, 30, tzinfo=timezone.utc)
